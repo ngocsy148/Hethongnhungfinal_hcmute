@@ -4,16 +4,6 @@
 #include <SPI.h>
 #include "config_types.h"
 
-#define W25Q_CMD_WRITE_ENABLE   0x06
-#define W25Q_CMD_READ_STATUS1   0x05
-#define W25Q_CMD_READ_DATA      0x03
-#define W25Q_CMD_PAGE_PROGRAM   0x02
-#define W25Q_CMD_SECTOR_ERASE   0x20
-#define W25Q_CMD_JEDEC_ID       0x9F
-
-#define LOG_RECORD_MAGIC        0xCAFEBABE
-#define LOG_SECTOR_ADDR         0x001000UL // Sector 1 lưu băng ghi hộp đen 15 giây
-
 class W25Q128_Flash {
 private:
     uint8_t csPin;
@@ -24,16 +14,14 @@ private:
 
     void waitBusy() {
         csLow();
-        SPI.transfer(W25Q_CMD_READ_STATUS1);
-        while (SPI.transfer(0x00) & 0x01) {
-            delay(1);
-        }
+        SPI.transfer(0x05);
+        while (SPI.transfer(0x00) & 0x01) { delay(1); }
         csHigh();
     }
 
     void writeEnable() {
         csLow();
-        SPI.transfer(W25Q_CMD_WRITE_ENABLE);
+        SPI.transfer(0x06);
         csHigh();
     }
 
@@ -44,11 +32,10 @@ public:
         csPin = cs;
         pinMode(csPin, OUTPUT);
         csHigh();
-
         SPI.begin(sck, miso, mosi, csPin);
 
         csLow();
-        SPI.transfer(W25Q_CMD_JEDEC_ID);
+        SPI.transfer(0x9F); // Đọc JEDEC ID
         uint8_t mfId  = SPI.transfer(0x00);
         uint8_t memId = SPI.transfer(0x00);
         uint8_t capId = SPI.transfer(0x00);
@@ -56,26 +43,24 @@ public:
 
         if (mfId == 0xEF && capId == 0x18) {
             isConnected = true;
-            Serial.printf("[W25Q128] Đã nhận chip Flash 16MB (ID: %02X %02X %02X)\n", mfId, memId, capId);
-            checkExistingLog();
+            Serial.printf("✅ [W25Q128] Đã kết nối Flash 16MB (ID: %02X %02X %02X)\n", mfId, memId, capId);
+            BlackboxLogRecord_t rec;
+            readBytes(LOG_SECTOR_ADDR, (uint8_t*)&rec, sizeof(BlackboxLogRecord_t));
+            hasSavedCrash = (rec.magic == LOG_RECORD_MAGIC);
             return true;
-        } else {
-            isConnected = false;
-            Serial.printf("[W25Q128] CẢNH BÁO: Chưa cắm W25Q128 (ID: %02X %02X %02X)\n", mfId, memId, capId);
-            return false;
         }
+        Serial.printf("⚠️ [W25Q128] Chưa cắm W25Q128 (ID: %02X %02X %02X)\n", mfId, memId, capId);
+        return false;
     }
 
     void readBytes(uint32_t addr, uint8_t *buf, uint16_t len) {
         waitBusy();
         csLow();
-        SPI.transfer(W25Q_CMD_READ_DATA);
+        SPI.transfer(0x03);
         SPI.transfer((addr >> 16) & 0xFF);
         SPI.transfer((addr >> 8) & 0xFF);
         SPI.transfer(addr & 0xFF);
-        for (uint16_t i = 0; i < len; i++) {
-            buf[i] = SPI.transfer(0x00);
-        }
+        for (uint16_t i = 0; i < len; i++) buf[i] = SPI.transfer(0x00);
         csHigh();
     }
 
@@ -83,13 +68,11 @@ public:
         waitBusy();
         writeEnable();
         csLow();
-        SPI.transfer(W25Q_CMD_PAGE_PROGRAM);
+        SPI.transfer(0x02);
         SPI.transfer((addr >> 16) & 0xFF);
         SPI.transfer((addr >> 8) & 0xFF);
         SPI.transfer(addr & 0xFF);
-        for (uint16_t i = 0; i < len; i++) {
-            SPI.transfer(buf[i]);
-        }
+        for (uint16_t i = 0; i < len; i++) SPI.transfer(buf[i]);
         csHigh();
         waitBusy();
     }
@@ -98,7 +81,7 @@ public:
         waitBusy();
         writeEnable();
         csLow();
-        SPI.transfer(W25Q_CMD_SECTOR_ERASE);
+        SPI.transfer(0x20);
         SPI.transfer((addr >> 16) & 0xFF);
         SPI.transfer((addr >> 8) & 0xFF);
         SPI.transfer(addr & 0xFF);
@@ -106,33 +89,18 @@ public:
         waitBusy();
     }
 
-    void checkExistingLog() {
-        BlackboxLogRecord_t rec;
-        readBytes(LOG_SECTOR_ADDR, (uint8_t*)&rec, sizeof(BlackboxLogRecord_t));
-        hasSavedCrash = (rec.magic == LOG_RECORD_MAGIC);
-        if (hasSavedCrash) {
-            Serial.println("[W25Q128] Phát hiện có băng ghi Hộp Đen 15 giây trong bộ nhớ! Gõ 'LOG' qua Bluetooth để xem.");
-        }
-    }
-
-    // Ghi trọn vẹn 16 mốc thời gian (T-10s đến T+5s) xuống W25Q128
     bool save15SecCrashWindow(BlackboxLogRecord_t *windowRecords) {
         if (!isConnected) return false;
-
-        // Xóa Sector cũ và ghi 16 mốc thời gian mới (Mỗi mốc cách nhau 64 bytes)
         eraseSector(LOG_SECTOR_ADDR);
         for (uint8_t i = 0; i < BLACKBOX_WINDOW_LEN; i++) {
             windowRecords[i].magic = LOG_RECORD_MAGIC;
-            uint32_t addr = LOG_SECTOR_ADDR + (uint32_t)i * 64UL;
-            writePage(addr, (const uint8_t*)&windowRecords[i], sizeof(BlackboxLogRecord_t));
+            writePage(LOG_SECTOR_ADDR + (uint32_t)i * 64UL, (const uint8_t*)&windowRecords[i], sizeof(BlackboxLogRecord_t));
         }
-
         hasSavedCrash = true;
-        Serial.println("\n💾 [W25Q128] ĐÃ GHI XONG BĂNG HỘP ĐEN 15 GIÂY (10s TRƯỚC + 5s SAU TAI NẠN) VÀO FLASH!\n");
+        Serial.println("\n💾 [W25Q128] ĐÃ LƯU XONG 15 GIÂY HỘP ĐEN VÀO FLASH!\n");
         return true;
     }
 
-    // Phục dựng lại diễn biến 15 giây từ W25Q128 để xem trên Điện thoại / Máy tính
     String getCrashHistorySummary() {
         if (!isConnected) return "Loi: Chua ket noi W25Q128!\n";
         if (!hasSavedCrash) return "Hop den W25Q128: Chua co vu tai nan nao.\n";
@@ -140,8 +108,7 @@ public:
         String out = "\n=== PHUC DUNG 15 GIAY TAI NAN (W25Q128) ===\n";
         BlackboxLogRecord_t rec;
         for (uint8_t i = 0; i < BLACKBOX_WINDOW_LEN; i++) {
-            uint32_t addr = LOG_SECTOR_ADDR + (uint32_t)i * 64UL;
-            readBytes(addr, (uint8_t*)&rec, sizeof(BlackboxLogRecord_t));
+            readBytes(LOG_SECTOR_ADDR + (uint32_t)i * 64UL, (uint8_t*)&rec, sizeof(BlackboxLogRecord_t));
             if (rec.magic == LOG_RECORD_MAGIC) {
                 char lineBuf[120];
                 const char *tag = (rec.rel_sec == 0) ? "💥 DAM!" : ((rec.crash_state >= 2) ? "⚠️ NGA" : "OK");
@@ -158,7 +125,7 @@ public:
         if (!isConnected) return;
         eraseSector(LOG_SECTOR_ADDR);
         hasSavedCrash = false;
-        Serial.println("[W25Q128] Đã xóa trắng bộ nhớ hộp đen!");
+        Serial.println("✅ [W25Q128] Đã xóa trắng lịch sử hộp đen!");
     }
 };
 
