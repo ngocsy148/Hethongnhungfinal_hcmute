@@ -10,7 +10,7 @@
 
 #define GPS_RX_PIN          18   // Nối với TX của GPS u-blox M10
 #define GPS_TX_PIN          8    // Nối với RX của GPS u-blox M10
-#define GPS_BAUD            38400
+#define GPS_BAUD            115200 // Đã cập nhật đúng chuẩn 115200 của M10
 
 #define SIM_RX_PIN          4    // Nối với TXD của SIM A7682S-LANS
 #define SIM_TX_PIN          5    // Nối với RXD của SIM A7682S-LANS

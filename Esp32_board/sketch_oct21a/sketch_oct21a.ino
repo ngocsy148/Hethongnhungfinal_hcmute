@@ -21,6 +21,7 @@ volatile TelemetryPacket_t latestIMU;
 volatile GPSData_t         latestGPS        = {false, 0.0, 0.0, 0.0f, 0};
 volatile bool              sosTriggered     = false;
 volatile bool              sosHandled       = false;
+volatile bool              simSendingNow    = false; // Khóa bảo vệ khi SIM đang bắn SMS
 volatile float             peakImpactG      = 1.0f;
 volatile float             secMaxG          = 1.0f;
 
@@ -131,6 +132,7 @@ void Task_Blackbox_Manager(void *pvParameters) {
             memcpy(&gpsSnap, (const void*)&latestGPS, sizeof(GPSData_t));
             BLE_SendToPhone("🚨 TAI NAN! Dang gui SMS SOS toi: " + sosPhoneNumber + "\n");
 
+            simSendingNow = true;
             simModem.sendEmergencySOS(
                 sosPhoneNumber,
                 latestIMU.roll,
@@ -139,6 +141,7 @@ void Task_Blackbox_Manager(void *pvParameters) {
                 gpsSnap,
                 fullCrashWindow[10].crash_state
             );
+            simSendingNow = false;
             lastOneSecMs = millis();
         }
 
@@ -148,14 +151,19 @@ void Task_Blackbox_Manager(void *pvParameters) {
             peakImpactG  = 1.0f;
         }
 
+        // 3. In đầy đủ thông số STM32 + GPS M10 + SĐT SOS mỗi 200ms
         if (now - lastPrintMs >= 200) {
             lastPrintMs = now;
-            Serial.printf("[#%6lu | Byte:%6lu] Roll:%6.2f° | Pitch:%6.2f° | %s || SDT:%s\n",
+            Serial.printf("[#%6lu] Roll:%6.2f° | Pitch:%6.2f° | %s || [GPS] Fix:%d Sat:%2d Lat:%.5f Lon:%.5f (%4.1fkm/h) || SDT:%s\n",
                           latestIMU.seq_num,
-                          rxByteCount,
                           latestIMU.roll,
                           latestIMU.pitch,
                           getCrashStateText(latestIMU.crash_state),
+                          latestGPS.is_valid,
+                          latestGPS.satellites,
+                          latestGPS.latitude,
+                          latestGPS.longitude,
+                          latestGPS.speed_kmh,
                           sosPhoneNumber.c_str());
         }
 
@@ -168,10 +176,10 @@ void setup() {
     delay(500);
 
     Serial.println("\n=======================================================");
-    Serial.println("   HỘP ĐEN XE MÁY: BẢN PHÂN CHIA MODULE HOÀN CHỈNH     ");
+    Serial.println("   HỘP ĐEN XE MÁY: STM32 + M10 + A7682S-LANS + W25Q128 ");
     Serial.println("=======================================================");
 
-    // 1. Khởi tạo W25Q128, Bluetooth BLE và SIM A7682S-LANS trước
+    // 1. Khởi tạo W25Q128, Bluetooth BLE, SIM A7682S-LANS và GPS M10 trước
     flashMemory.begin(W25Q_CS_PIN, W25Q_SCK_PIN, W25Q_MISO_PIN, W25Q_MOSI_PIN);
     BLE_Init_Server();
     simModem.initModem();
@@ -185,11 +193,12 @@ void setup() {
 }
 
 /* ============================================================================
- * VÒNG LẶP CHÍNH loop() (CORE 1): Đọc gói tin 100Hz từ STM32 & Auto-Zero góc
+ * VÒNG LẶP CHÍNH loop() (CORE 1): Đọc gói tin 100Hz từ STM32 & Giải mã GPS M10
  * ============================================================================ */
 void loop() {
     static uint32_t tiltStartMs = 0;
 
+    // 1. Đọc gói tin Kalman 100Hz từ STM32F401
     while (STM32_UART.available()) {
         uint8_t b = STM32_UART.read();
         rxByteCount++;
@@ -251,5 +260,16 @@ void loop() {
             }
         }
     }
+
+    // 2. Đọc liên tục bản tin NMEA từ GPS u-blox M10 khi không bận bắn SMS
+    if (!simSendingNow) {
+        while (SIM_UART.available()) {
+            uint8_t c = SIM_UART.read();
+            if (c != 0x00) {
+                gpsParser.feed((char)c, &latestGPS);
+            }
+        }
+    }
+
     delay(1);
 }
